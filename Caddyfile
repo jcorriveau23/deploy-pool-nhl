@@ -1,0 +1,77 @@
+slapshot.xyz, www.slapshot.xyz {
+	encode zstd gzip
+
+	# Security headers, applied to every response from every handle below —
+	# the frontend, the backend and the injury file alike. They live here rather
+	# than in the frontend's next.config.mjs so that one edit covers all three
+	# and does not need an image rebuild and redeploy to take effect.
+	#
+	# Caddy does not set any of these on its own; automatic HTTPS gets you the
+	# certificate and the http->https redirect, not the header. Verify with
+	# `curl -I https://slapshot.xyz` after reloading, and if any of these turn
+	# out to be already present, delete the duplicate rather than serving it
+	# twice.
+	header {
+		# Trust the declared Content-Type instead of sniffing the body, which is
+		# what lets a served file be reinterpreted as a script.
+		X-Content-Type-Options nosniff
+
+		# An outbound link leaks the referring URL. Same-origin navigations keep
+		# the full path, anything cross-origin sends only the origin, so a pool
+		# name never travels to a third-party site.
+		Referrer-Policy strict-origin-when-cross-origin
+
+		# Nothing here is meant to be framed. A draft control under an invisible
+		# iframe on someone else's page is the clickjacking case.
+		X-Frame-Options DENY
+
+		# The app requests none of these, so the grants start empty.
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+
+		# Two years, subdomains included. Deliberately without `preload`: that
+		# ships the domain in a browser-baked list and is slow to reverse.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+	}
+
+	# The injury list is produced by the scraper into a shared volume, so it is
+	# served from there in preference to the frontend image, whose baked-in
+	# public/injured-players.json is frozen at build time. The client fetches
+	# it from the site root (src/context/injury-context.tsx).
+	#
+	# The fallback matters whenever the scraper is not running — right now it is
+	# held behind a compose profile pending an arm64 image. An unconditional
+	# file_server over an empty volume 404s and shadows the copy baked into the
+	# frontend, so the client's fetch fails and it falls back to an empty object:
+	# no injuries shown at all, rather than a merely stale list. Proxying when
+	# the file is absent serves the baked-in copy instead, and costs nothing once
+	# the scraper is back — the volume file wins again the moment it exists.
+	#
+	# `route` is what makes this work: inside a plain handle, Caddy's directive
+	# ordering runs reverse_proxy before file_server, so the proxy would always
+	# win. route preserves the order written here.
+	handle /injured-players.json {
+		root * /srv/injury
+		@present file /injured-players.json
+		route {
+			file_server @present
+			reverse_proxy frontend:3000
+		}
+	}
+
+	# The rust backend serves its routes under the /api-rust prefix. Client-side
+	# calls reach it here; server-side calls go direct over the compose network
+	# via API_URL, so they never pass through Caddy.
+	#
+	# The nginx config this replaces set proxy_read_timeout 310s here and mapped
+	# Connection/Upgrade by hand for the draft rooms. Neither is needed: caddy
+	# proxies WebSockets without configuration and its upstream read timeout
+	# defaults to no limit, so a long-lived draft connection is not cut off.
+	# X-Forwarded-For/-Proto/-Host are also set automatically.
+	handle /api-rust/* {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

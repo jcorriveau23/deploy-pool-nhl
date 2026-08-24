@@ -1,0 +1,153 @@
+name: slapshot
+
+# Production stack. Every application image is pulled from GHCR, never built
+# here: the three application repos build and push on release, this file only
+# says which tag runs and how the services find each other.
+#
+# Unlike the per-repo development compose files, mongo and redis publish no
+# ports. They are reachable only over the compose network, which matters on a
+# public VPS where a published 27017 is an open database.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and OCSP staples. Losing this volume means re-issuing from
+      # Let's Encrypt, which is rate-limited — keep it across redeploys.
+      - caddy-data:/data
+      - caddy-config:/config
+      # Read side of the injury file the scraper writes. See the Caddyfile.
+      - injury-data:/srv/injury:ro
+    depends_on:
+      - frontend
+      - backend
+
+  frontend:
+    image: ghcr.io/jcorriveau23/new-frontend-pool-nhl:latest
+    restart: unless-stopped
+    # API_URL is the base that src/lib/server-api.ts appends /api-rust to, so
+    # it points at the backend service itself, not at Caddy.
+    environment:
+      API_URL: http://backend:8000
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+
+  backend:
+    image: ghcr.io/jcorriveau23/backend-pool-nhl:latest
+    restart: unless-stopped
+    # Every setting the backend reads is here. The image bakes in no config and
+    # this repo no longer mounts a config directory, so this block is the whole
+    # picture — and there is no second copy of release.json here to drift
+    # against the one in backend-pool-nhl, which keeps localhost defaults
+    # because those are correct for `cargo run --release` on a dev machine.
+    #
+    # Needs a backend image built after the file source was made optional in
+    # settings.rs. Older images abort at startup with
+    #   Could not parse settings: configuration file "config/release" not found
+    # so release the backend before applying this file to a running host.
+    #
+    # Nested keys separate on __, so APP_SERVER__PORT sets server.port.
+    environment:
+      APP_ENVIRONMENT: production
+      APP_SERVER__PORT: "8000"
+      APP_DATABASE__URI: mongodb://mongo:27017
+      APP_DATABASE__NAME: hockeypool
+      APP_REDIS__URI: redis://redis:6379
+      APP_AUTH__JWKS_URL: https://dd4e9e43-679b-4aff-b8de-9e8fd4bd7f30.hanko.io/.well-known/jwks.json
+      APP_AUTH__TOKEN_AUDIENCE: slapshot.xyz
+      APP_LOGGER__LEVEL: info
+    expose:
+      - "8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scraper:
+    image: ghcr.io/jcorriveau23/script-pool-nhl:latest
+    restart: unless-stopped
+    # Held out of the default `up` until the image publishes an arm64 variant.
+    # On the Ampere host the amd64-only image cannot exec, and `restart:
+    # unless-stopped` turns that into a crash loop that the rest of the stack
+    # comes up around — a site that looks healthy while nothing refreshes.
+    #
+    # Start it once that is fixed:
+    #   docker compose --profile scrapers up -d
+    # Naming the service explicitly also works, which is what keeps the deploy
+    # workflow in script-pool-nhl functioning unchanged:
+    #   docker compose up -d scraper
+    profiles: ["scrapers"]
+    # The long-running daemon: daily leaders every 3 minutes, injuries hourly.
+    # The one-shot jobs are run by hand and start regardless of the profile:
+    #   docker compose run --rm scraper nhl-cumulate-stats
+    command: ["nhl-scheduler"]
+    environment:
+      NHL_HELPER_MONGO_URI: mongodb://mongo:27017
+      NHL_HELPER_MONGO_DATABASE: hockeypool
+      # The daily-leaders job reads the NHL API through the frontend's
+      # /api/games/[date] route handler, so it depends on the frontend being up.
+      NHL_HELPER_NHL_PROXY_URL: http://frontend:3000/api
+      NHL_HELPER_POOL_API_URL: http://backend:8000/api-rust
+      # Written into the shared volume rather than the frontend's public/, which
+      # is baked into the frontend image at build time and not writable from here.
+      NHL_HELPER_INJURED_PLAYERS_OUTPUT: /data/injured-players.json
+      NHL_HELPER_NON_MATCHING_PLAYERS_OUTPUT: /data/non-matching-players-cbs.json
+    volumes:
+      - injury-data:/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+      # No initdb.d script. Indexes are created by the backend on every start
+      # (init_indexes in pool_service, players_service and daily_leaders_service),
+      # which is the only mechanism that survives a restore: mongorestore --drop
+      # drops each collection and its indexes, and an initdb.d script has long
+      # since run by then — it only ever fires on the first init of an empty
+      # volume. Restarting the backend after a restore rebuilds them.
+
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    # 8-alpine: the draft rooms rely on hash field TTLs (HEXPIRE), redis >= 7.4.
+    image: redis:8-alpine
+    restart: unless-stopped
+    # Draft-room state is short-lived, but a snapshot every 60s means a restart
+    # mid-draft does not drop the room.
+    command: ["redis-server", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  injury-data:
