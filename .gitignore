@@ -1,0 +1,4 @@
+# Timestamped copies of compose made before manual edits. Once this repo is in
+# git, history is the backup — a committed .bak is just a second answer to the
+# question of which file is live.
+*.bak-*
