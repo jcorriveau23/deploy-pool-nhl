@@ -334,7 +334,7 @@
     },
     {
       "type": "stat",
-      "title": "Container restarts (1h)",
+      "title": "Restarts / OOM kills",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -384,11 +384,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(changes(container_start_time_seconds{container_label_com_docker_compose_project=\"slapshot\"}[1h]))",
+          "expr": "sum(docker_container_status_restart_count{com_docker_compose_project=\"slapshot\"}) + sum(docker_container_status_oomkilled{com_docker_compose_project=\"slapshot\"})",
+          "legendFormat": "",
           "refId": "A"
         }
       ],
-      "description": "Anything above zero means a service died and came back \u2014 check its logs.",
+      "description": "Restarts plus OOM kills across the stack. Anything above zero means a service died \u2014 check its logs. The Docker API exposes both directly, which cAdvisor did not.",
       "id": 7
     },
     {
@@ -430,7 +431,7 @@
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "short"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -454,12 +455,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"slapshot\"}[1m]))",
-          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "expr": "sum by (com_docker_compose_service) (docker_container_cpu_usage_percent{com_docker_compose_project=\"slapshot\"})",
+          "legendFormat": "{{com_docker_compose_service}}",
           "refId": "A"
         }
       ],
-      "description": "In cores. The Ampere host has 2, so a stacked total approaching 2.0 is saturation. Watch `backend` during a draft.",
+      "description": "Percent of ONE core, as `docker stats` reports it \u2014 the host has 2, so the stacked total saturates at 200%, not 100%. Watch `backend` during a draft.",
       "id": 9
     },
     {
@@ -512,12 +513,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=\"slapshot\"})",
-          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "expr": "sum by (com_docker_compose_service) (docker_container_mem_usage{com_docker_compose_project=\"slapshot\"})",
+          "legendFormat": "{{com_docker_compose_service}}",
           "refId": "A"
         }
       ],
-      "description": "Working set, which is what the OOM killer looks at.",
+      "description": "Resident usage as the Docker API reports it.",
       "id": 10
     },
     {
@@ -570,12 +571,13 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"slapshot\"}[1m]))",
-          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "expr": "sum by (com_docker_compose_service) (rate(docker_container_net_rx_bytes{com_docker_compose_project=\"slapshot\"}[1m]))",
+          "legendFormat": "{{com_docker_compose_service}}",
           "refId": "A"
         }
       ],
-      "id": 11
+      "id": 11,
+      "description": ""
     },
     {
       "type": "timeseries",
@@ -627,8 +629,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"slapshot\"}[1m]))",
-          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "expr": "sum by (com_docker_compose_service) (rate(docker_container_net_tx_bytes{com_docker_compose_project=\"slapshot\"}[1m]))",
+          "legendFormat": "{{com_docker_compose_service}}",
           "refId": "A"
         }
       ],

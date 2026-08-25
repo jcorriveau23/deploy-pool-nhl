@@ -19,11 +19,11 @@ scrape_configs:
     static_configs:
       - targets: ["node-exporter:9100"]
 
-  # Per-container CPU, memory, network and restarts. This is the one that
-  # answers "was the backend pegged during the draft".
-  - job_name: cadvisor
+  # Per-container CPU, memory, network and restarts, via the Docker API. This
+  # is the one that answers "was the backend pegged during the draft".
+  - job_name: telegraf
     static_configs:
-      - targets: ["cadvisor:8080"]
+      - targets: ["telegraf:9273"]
 
   # Caddy sees every client request, including the websocket upgrades. Needs
   # the global `metrics` option in the Caddyfile to emit request series at all

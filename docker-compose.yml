@@ -192,9 +192,20 @@ services:
     ports:
       - "127.0.0.1:3001:3000"
     environment:
-      # Set GRAFANA_ADMIN_PASSWORD in .env on the host (gitignored). Without it
-      # grafana would come up on admin/admin.
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      # Set GRAFANA_ADMIN_PASSWORD in .env on the host (gitignored).
+      #
+      # The default is a placeholder, not a fallback, and the `:-` form is
+      # deliberate: compose interpolates this file in full on *every* command
+      # regardless of profiles, so a `:?` required-variable here fails
+      # `docker compose up -d backend` too — which is what the deploy workflows
+      # in the application repos run. A missing .env would have broken every
+      # release, not just monitoring.
+      #
+      # The placeholder is non-empty on purpose. Grafana treats an empty
+      # GF_SECURITY_ADMIN_PASSWORD as unset and falls back to admin/admin;
+      # this way a forgotten .env yields an unusable password instead of a
+      # well-known one.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-unset-see-README-monitoring}
       # Nothing to sign up for on a single-operator install.
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
@@ -208,34 +219,33 @@ services:
     depends_on:
       - prometheus
 
-  # Per-container CPU/memory/network. Needs a lot of the host read-only to see
-  # the cgroups and the docker state.
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.52.1
+  # Per-container CPU, memory and network, read from the Docker API.
+  #
+  # Replaces cAdvisor, which is incompatible with this host's containerd
+  # snapshotter — see the header of monitoring/telegraf.conf for the full
+  # reason and what was tried.
+  telegraf:
+    image: telegraf:1.33-alpine
     restart: unless-stopped
     profiles: ["monitoring"]
-    command:
-      # Only report on docker containers — without this cadvisor also walks
-      # every systemd slice on the host, which is most of its CPU cost and
-      # none of what this stack cares about.
-      - --docker_only=true
-      - --housekeeping_interval=10s
-      # Per-process and per-filesystem-topology metrics are a large slice of the
-      # series count and answer nothing here.
-      - --disable_metrics=percpu,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl
+    # Runs as the unprivileged `telegraf` user *on purpose*. The image's
+    # entrypoint drops root to that user via su-exec, and su-exec discards
+    # supplementary groups — so `user: root` plus `group_add` silently loses the
+    # docker group and every API call fails with "permission denied". Starting
+    # as non-root skips that branch entirely and keeps group_add intact.
+    user: telegraf
+    group_add:
+      # The host's docker group. Differs per machine, so it comes from .env:
+      #   echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+      # 999 is the usual value on Debian/Ubuntu. `:-` not `:?` so a missing
+      # .env cannot break unrelated compose commands.
+      - "${DOCKER_GID:-999}"
     volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    devices:
-      - /dev/kmsg
-    # cadvisor cannot read the cgroup hierarchy without it on cgroup v2 hosts,
-    # which Ubuntu 24.04 is.
-    privileged: true
+      # Not :ro — connecting to a unix socket needs write permission on it.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./monitoring/telegraf.conf:/etc/telegraf/telegraf.conf:ro
     expose:
-      - "8080"
+      - "9273"
 
   # Host CPU, load, memory, disk and network. Reads the host's procfs/sysfs
   # through the mounts rather than joining the host network namespace, so it
