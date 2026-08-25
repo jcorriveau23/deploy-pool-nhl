@@ -1,0 +1,40 @@
+# Scrape targets for the slapshot stack. Everything here is reached over the
+# compose network by service name — none of these ports are published to the
+# host, so the exporters are not on the internet.
+global:
+  # 15s is a compromise: fine enough to see a draft's shape in the graphs,
+  # coarse enough that 30 days of retention stays under a couple of GB.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Host-level: CPU, load, memory, disk, network. Reads the host's /proc and
+  # /sys through the bind mounts in compose, so these are the machine's
+  # numbers, not the container's.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Per-container CPU, memory, network and restarts. This is the one that
+  # answers "was the backend pegged during the draft".
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # Caddy sees every client request, including the websocket upgrades. Needs
+  # the global `metrics` option in the Caddyfile to emit request series at all
+  # — the :2020 listener only serves the registry.
+  - job_name: caddy
+    static_configs:
+      - targets: ["caddy:2020"]
+
+  # The rust backend's own listener, separate from the app port so /metrics is
+  # never reachable through the routes Caddy proxies. Draft socket gauges, the
+  # broadcast-lag counter and per-command latency live here.
+  - job_name: backend
+    static_configs:
+      - targets: ["backend:9000"]

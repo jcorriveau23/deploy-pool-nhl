@@ -1,0 +1,2 @@
+# Empty on purpose. Grafana logs an error at every start for each provisioning
+# subdirectory that does not exist, and git does not track empty directories.

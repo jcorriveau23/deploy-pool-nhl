@@ -64,8 +64,12 @@ services:
       APP_AUTH__JWKS_URL: https://dd4e9e43-679b-4aff-b8de-9e8fd4bd7f30.hanko.io/.well-known/jwks.json
       APP_AUTH__TOKEN_AUDIENCE: slapshot.xyz
       APP_LOGGER__LEVEL: info
+      # Prometheus scrape port. Its own listener, so /metrics cannot be reached
+      # through /api-rust/* — the only prefix Caddy proxies. Never publish it.
+      APP_SERVER__METRICS_PORT: "9000"
     expose:
       - "8000"
+      - "9000"
     depends_on:
       mongo:
         condition: service_healthy
@@ -145,9 +149,120 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # Monitoring. Held behind the `monitoring` profile so `docker compose up -d`
+  # keeps starting only the site — bring it up with
+  #   docker compose --profile monitoring up -d
+  # Nothing here is published to the internet: prometheus and the two exporters
+  # are compose-network only, and grafana binds to the host's loopback so it is
+  # reached over an SSH tunnel rather than a public route. See the README.
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 30 days is more than enough to compare this draft against the last one,
+      # and the size cap is the real guard — whichever trips first wins, so the
+      # volume cannot quietly fill the boot disk.
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=2GB
+      # --web.enable-lifecycle is deliberately not passed: it defaults to off,
+      # and passing it as =false is rejected by the flag parser outright
+      # ("unexpected false"), which crash-loops the container.
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    expose:
+      - "9090"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    # Loopback only. Docker publishes to the container's interface, not the
+    # host's, so binding 127.0.0.1 here is what keeps grafana off the public
+    # internet even though the port is published — reach it with
+    #   ssh -N -L 3001:127.0.0.1:3001 user@server
+    # then open http://localhost:3001. Grafana has a steady stream of CVEs and
+    # this stack has no reason to give it a public route.
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      # Set GRAFANA_ADMIN_PASSWORD in .env on the host (gitignored). Without it
+      # grafana would come up on admin/admin.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      # Nothing to sign up for on a single-operator install.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Phones home for plugin/version checks otherwise.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  # Per-container CPU/memory/network. Needs a lot of the host read-only to see
+  # the cgroups and the docker state.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      # Only report on docker containers — without this cadvisor also walks
+      # every systemd slice on the host, which is most of its CPU cost and
+      # none of what this stack cares about.
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      # Per-process and per-filesystem-topology metrics are a large slice of the
+      # series count and answer nothing here.
+      - --disable_metrics=percpu,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    # cadvisor cannot read the cgroup hierarchy without it on cgroup v2 hosts,
+    # which Ubuntu 24.04 is.
+    privileged: true
+    expose:
+      - "8080"
+
+  # Host CPU, load, memory, disk and network. Reads the host's procfs/sysfs
+  # through the mounts rather than joining the host network namespace, so it
+  # still resolves on the compose network for prometheus to scrape.
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      # Without this every container's overlay mount shows up as a filesystem.
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker)($$|/)
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+    expose:
+      - "9100"
+
 volumes:
   mongo-data:
   redis-data:
   caddy-data:
   caddy-config:
   injury-data:
+  prometheus-data:
+  grafana-data:

@@ -1,3 +1,30 @@
+{
+	# Turns on request instrumentation across every server. Without it the
+	# registry served below carries only the two config-reload gauges — the
+	# caddy_http_requests_total / _request_duration_seconds families do not
+	# exist at all. Verified: 2 series without this block, 106 with it.
+	metrics
+}
+
+# The metrics registry, on its own listener. Deliberately not the admin
+# endpoint on :2019: the admin API can rewrite caddy's whole config, and it is
+# bound to localhost inside the container by default — putting a site block on
+# :2019 to reach the metrics would be the thing that exposes it to every other
+# container on the compose network. This port is not published to the host, so
+# only prometheus can reach it.
+:2020 {
+	# `route` for the same reason as the injury handler below: caddy runs
+	# directives in its own fixed order, not the order written, and `respond`
+	# outranks `metrics` — without route the 404 swallows /metrics too.
+	route {
+		metrics /metrics
+
+		# A site block with no fallback answers unmatched paths with an empty
+		# 200, which reads like a working endpoint. Be explicit instead.
+		respond 404
+	}
+}
+
 slapshot.xyz, www.slapshot.xyz {
 	encode zstd gzip
 

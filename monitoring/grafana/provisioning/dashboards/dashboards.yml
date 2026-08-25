@@ -1,0 +1,13 @@
+# Any dashboard JSON dropped into monitoring/grafana/dashboards/ is loaded on
+# start. Keeping them in git means a lost grafana volume costs nothing.
+apiVersion: 1
+
+providers:
+  - name: slapshot
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

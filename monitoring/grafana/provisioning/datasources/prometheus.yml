@@ -1,0 +1,15 @@
+# Provisioned at startup so a fresh grafana volume comes up already pointing at
+# prometheus — there is no click-through setup step after `compose up`.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # Explicit uid so the dashboard JSON in monitoring/grafana/dashboards/ can
+    # reference it by name. Without it grafana generates a random uid per
+    # install and the provisioned panels come up unlinked.
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
