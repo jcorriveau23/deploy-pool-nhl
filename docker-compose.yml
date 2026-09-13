@@ -78,22 +78,45 @@ services:
 
   scraper:
     image: ghcr.io/jcorriveau23/script-pool-nhl:latest
-    restart: unless-stopped
-    # Held out of the default `up` until the image publishes an arm64 variant.
-    # On the Ampere host the amd64-only image cannot exec, and `restart:
-    # unless-stopped` turns that into a crash loop that the rest of the stack
-    # comes up around — a site that looks healthy while nothing refreshes.
+    # Never brought `up`, and deliberately carries no `command:` — there is no
+    # daemon in this image. script-pool-nhl fb6881e ("release and move to
+    # service instead") deleted nhl_helper/main_scheduler.py and its
+    # `nhl-scheduler` entry point; the schedule now lives in systemd timers on
+    # the host, each of which runs one job in a fresh container:
     #
-    # Start it once that is fixed:
-    #   docker compose --profile scrapers up -d
-    # Naming the service explicitly also works, which is what keeps the deploy
-    # workflow in script-pool-nhl functioning unchanged:
-    #   docker compose up -d scraper
+    #   ExecStart=/usr/bin/docker compose run --rm --no-deps scraper %i
+    #
+    # So this service exists only to hold the environment, the network and the
+    # injury volume those runs need — restating them in six unit files is what
+    # it is here to avoid. The timers themselves are in deploy/systemd in
+    # script-pool-nhl, which is also where the cadence is documented.
+    #
+    # The six jobs, by hand. `run` enables a service's own profiles, so being
+    # behind one costs nothing here:
+    #   docker compose run --rm --no-deps scraper nhl-daily-leaders
+    #   docker compose run --rm --no-deps scraper nhl-injuries
+    #   docker compose run --rm --no-deps scraper nhl-active-players
+    #   docker compose run --rm --no-deps scraper nhl-contracts
+    #   docker compose run --rm --no-deps scraper nhl-cumulate-stats
+    #   docker compose run --rm --no-deps scraper nhl-update-pool-players
+    #
+    # --no-deps is not optional in practice: without it compose recreates mongo
+    # from whichever files are on the command line, which on a dev machine
+    # silently drops the 127.0.0.1 ports the dev overlay publishes.
+    #
+    # The profile is the guard that keeps `docker compose up -d` from starting
+    # something that is not meant to run. An accidental `up` is survivable
+    # rather than silent — the image's default CMD prints a usage line and
+    # exits 64 — but there is no `restart:` here precisely so that it stays one
+    # Exited container instead of a loop. `docker compose pull scraper` names
+    # the service explicitly and works regardless of the profile, which is all
+    # the release workflow in script-pool-nhl does.
+    #
+    # (The image was amd64-only for a while, which the Ampere host cannot exec.
+    # Since fb6881e the release builds arm64 and amd64 in a matrix and merges
+    # them by digest, so `:latest` is a multi-arch manifest and the host picks
+    # its own. That is no longer a reason to hold anything back.)
     profiles: ["scrapers"]
-    # The long-running daemon: daily leaders every 3 minutes, injuries hourly.
-    # The one-shot jobs are run by hand and start regardless of the profile:
-    #   docker compose run --rm scraper nhl-cumulate-stats
-    command: ["nhl-scheduler"]
     environment:
       NHL_HELPER_MONGO_URI: mongodb://mongo:27017
       NHL_HELPER_MONGO_DATABASE: hockeypool
@@ -106,7 +129,16 @@ services:
       NHL_HELPER_INJURED_PLAYERS_OUTPUT: /data/injured-players.json
       NHL_HELPER_NON_MATCHING_PLAYERS_OUTPUT: /data/non-matching-players-cbs.json
     volumes:
+      # nhl-injuries writes here as appuser (uid 999), but Docker initialises a
+      # named volume root-owned unless the image ships content at the
+      # mountpoint — which this one does not. A volume created empty therefore
+      # fails the job with EACCES on /data/injured-players.json. Until the
+      # scraper image creates /data owned by appuser, seed it once per host:
+      #   docker run --rm -u 0 -v slapshot_injury-data:/data alpine chown 999:999 /data
       - injury-data:/data
+    # Consulted only by a `run` that omits --no-deps, which no scheduled path
+    # does — on the host these are already up, and starting a stopped backend
+    # to take one dump of the injury list is not what the job asked for.
     depends_on:
       mongo:
         condition: service_healthy
@@ -128,8 +160,26 @@ services:
       # volume. Restarting the backend after a restore rebuilds them.
 
     healthcheck:
+      # mongosh is a Node.js application, not the old C++ shell: every probe
+      # starts a full v24 runtime and opens five connections just to say
+      # `ping`, costing ~0.5s at ~50% of one core on this 2-core host. At the
+      # former 10s interval that burned ~5.6% of a core around the clock —
+      # roughly 340x what the backend itself uses — and buried mongo's log
+      # under connection churn.
+      #
+      # 60s because the only consumer of this is the `condition:
+      # service_healthy` gate that backend and scraper depend on, and that
+      # matters at startup. Nothing in this stack reacts to mongo going
+      # unhealthy later, so probing six times a minute forever bought nothing.
+      #
+      # start_interval keeps deploys fast. Without it Docker waits a full
+      # `interval` before the *first* probe, so a 60s interval would add ~60s
+      # to every `up` while backend sat waiting on the gate; during
+      # start_period it probes every 2s instead and flips healthy as soon as
+      # mongo answers. Needs Engine >= 25 (host runs 29.7.2).
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      interval: 60s
+      start_interval: 2s
       timeout: 5s
       retries: 5
       start_period: 20s
@@ -148,6 +198,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Twice-daily dump of the pools collection to the host. Not behind a profile:
+  # a backup you have to remember to start is not a backup.
+  #
+  # mongo:7 rather than a purpose-built image because mongodump has to match
+  # the server it dumps — same image, same version, no drift to track.
+  backup:
+    image: mongo:7
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/backup.sh"]
+    environment:
+      BACKUP_MONGO_URI: mongodb://mongo:27017
+      BACKUP_DB: hockeypool
+      BACKUP_COLLECTION: pools
+      # Local time inside the container, which is UTC unless this is set. The
+      # hours below are meaningless without knowing which clock they are on.
+      TZ: America/Toronto
+      BACKUP_HOURS: "04 16"
+      BACKUP_KEEP_DAYS: "7"
+    volumes:
+      - ./backup/backup.sh:/usr/local/bin/backup.sh:ro
+      # A bind mount, not a named volume, on purpose: these files have to be
+      # reachable by whatever copies them off the host, and `docker volume
+      # inspect` is a bad prerequisite for a disaster-recovery step. Override
+      # the path with BACKUP_DIR in .env; `:-` for the reason given under
+      # grafana below.
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      mongo:
+        condition: service_healthy
 
   # ---------------------------------------------------------------------------
   # Monitoring. Held behind the `monitoring` profile so `docker compose up -d`
