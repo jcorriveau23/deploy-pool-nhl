@@ -128,8 +128,26 @@ services:
       # volume. Restarting the backend after a restore rebuilds them.
 
     healthcheck:
+      # mongosh is a Node.js application, not the old C++ shell: every probe
+      # starts a full v24 runtime and opens five connections just to say
+      # `ping`, costing ~0.5s at ~50% of one core on this 2-core host. At the
+      # former 10s interval that burned ~5.6% of a core around the clock —
+      # roughly 340x what the backend itself uses — and buried mongo's log
+      # under connection churn.
+      #
+      # 60s because the only consumer of this is the `condition:
+      # service_healthy` gate that backend and scraper depend on, and that
+      # matters at startup. Nothing in this stack reacts to mongo going
+      # unhealthy later, so probing six times a minute forever bought nothing.
+      #
+      # start_interval keeps deploys fast. Without it Docker waits a full
+      # `interval` before the *first* probe, so a 60s interval would add ~60s
+      # to every `up` while backend sat waiting on the gate; during
+      # start_period it probes every 2s instead and flips healthy as soon as
+      # mongo answers. Needs Engine >= 25 (host runs 29.7.2).
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
+      interval: 60s
+      start_interval: 2s
       timeout: 5s
       retries: 5
       start_period: 20s
@@ -148,6 +166,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Twice-daily dump of the pools collection to the host. Not behind a profile:
+  # a backup you have to remember to start is not a backup.
+  #
+  # mongo:7 rather than a purpose-built image because mongodump has to match
+  # the server it dumps — same image, same version, no drift to track.
+  backup:
+    image: mongo:7
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/backup.sh"]
+    environment:
+      BACKUP_MONGO_URI: mongodb://mongo:27017
+      BACKUP_DB: hockeypool
+      BACKUP_COLLECTION: pools
+      # Local time inside the container, which is UTC unless this is set. The
+      # hours below are meaningless without knowing which clock they are on.
+      TZ: America/Toronto
+      BACKUP_HOURS: "04 16"
+      BACKUP_KEEP_DAYS: "7"
+    volumes:
+      - ./backup/backup.sh:/usr/local/bin/backup.sh:ro
+      # A bind mount, not a named volume, on purpose: these files have to be
+      # reachable by whatever copies them off the host, and `docker volume
+      # inspect` is a bad prerequisite for a disaster-recovery step. Override
+      # the path with BACKUP_DIR in .env; `:-` for the reason given under
+      # grafana below.
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      mongo:
+        condition: service_healthy
 
   # ---------------------------------------------------------------------------
   # Monitoring. Held behind the `monitoring` profile so `docker compose up -d`

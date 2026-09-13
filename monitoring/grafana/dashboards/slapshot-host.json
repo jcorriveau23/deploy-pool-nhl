@@ -455,12 +455,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (com_docker_compose_service) (docker_container_cpu_usage_percent{com_docker_compose_project=\"slapshot\"})",
+          "expr": "sum by (com_docker_compose_service) (rate(docker_container_cpu_usage_total{com_docker_compose_project=\"slapshot\", cpu=\"cpu-total\"}[5m])) / 1e7",
           "legendFormat": "{{com_docker_compose_service}}",
           "refId": "A"
         }
       ],
-      "description": "Percent of ONE core, as `docker stats` reports it \u2014 the host has 2, so the stacked total saturates at 200%, not 100%. Watch `backend` during a draft.",
+      "description": "Percent of ONE core, averaged over 5 minutes \u2014 the host has 2, so the stacked total saturates at 200%, not 100%. Watch `backend` during a draft.\n\nrate() over the cumulative counter, deliberately, not docker_container_cpu_usage_percent: that field is an instantaneous ~1s sample taken once per 15s scrape, so any short repeating burst beats against the scrape interval and gets drawn at the beat period rather than its own. mongo's old 10s healthcheck surfaced here as a phantom ~105s rhythm (LCM of 10.5s and 15s) that looked like a once-a-minute workload and was really six bursts a minute. rate() integrates every cycle the container actually used, so it cannot alias.",
       "id": 9
     },
     {
