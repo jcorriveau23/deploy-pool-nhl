@@ -128,6 +128,10 @@ services:
       # is baked into the frontend image at build time and not writable from here.
       NHL_HELPER_INJURED_PLAYERS_OUTPUT: /data/injured-players.json
       NHL_HELPER_NON_MATCHING_PLAYERS_OUTPUT: /data/non-matching-players-cbs.json
+      # nhl-daily-leaders picks its date from the local clock: before noon it
+      # polls yesterday. On the container's default UTC that flipped at 20:00
+      # ET, so the evening's games were never polled on their own date.
+      TZ: America/Toronto
     volumes:
       # nhl-injuries writes here as appuser (uid 999), but Docker initialises a
       # named volume root-owned unless the image ships content at the
